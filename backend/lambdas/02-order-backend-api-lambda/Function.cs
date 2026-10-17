@@ -39,15 +39,17 @@ public sealed class Function
         ILambdaContext context
     )
     {
+        var correlationId = request.RequestContext?.RequestId ?? context.AwsRequestId;
+        
         try
         {
             var method = request.HttpMethod;
             var path = request.Path;
-            var claims = request.RequestContext.Authorizer?.Claims
+            var claims = request.RequestContext?.Authorizer?.Claims
                 ?? new Dictionary<string, string>();
 
             if (method == "POST" && path == "/orders")
-                return await CreateOrder(request, claims);
+                return await CreateOrder(request, claims, context, correlationId);
 
             if (method == "GET" && path == "/orders")
                 return await ListBuyerOrders(claims);
@@ -59,18 +61,20 @@ public sealed class Function
         }
         catch (Exception exception)
         {
-            context.Logger.LogError(
-                "order-request-failed: {Message}\n{StackTrace}",
+            Log(context, "error", "order-request-failed", correlationId, new
+            {
                 exception.Message,
                 exception.StackTrace
-            );
-            return Json(500, new { message = "Internal server error." });
+            });
+            return Json(500, new { message = "Internal server error." }, correlationId);
         }
     }
 
     private async Task<APIGatewayProxyResponse> CreateOrder(
         APIGatewayProxyRequest request,
-        IDictionary<string, string> claims
+        IDictionary<string, string> claims,
+        ILambdaContext context,
+        string correlationId
     )
     {
         var input = JsonSerializer.Deserialize<CreateOrderRequest>(request.Body ?? "{}", JsonOptions);
@@ -117,8 +121,18 @@ public sealed class Function
         {
             QueueUrl = _queueUrl,
             MessageBody = JsonSerializer.Serialize(orderEvent, JsonOptions),
+            MessageAttributes = new Dictionary<string, MessageAttributeValue>
+            {
+                ["correlationId"] = new()
+                {
+                    DataType = "String",
+                    StringValue = correlationId,
+                },
+            },
         });
-
+        
+        Log(context, "info", "order-enqueued", correlationId, new { orderId, buyerId });
+        
         return Json(202, new { orderId, status = "pending", order = pendingOrder });
     }
 
@@ -159,16 +173,38 @@ public sealed class Function
         );
     }
 
-    private static APIGatewayProxyResponse Json(int statusCode, object body) => new()
+    private static APIGatewayProxyResponse Json(int statusCode, object body, string? correlationId = null)
     {
-        StatusCode = statusCode,
-        Headers = new Dictionary<string, string>
+        var headers = new Dictionary<string, string>
         {
             ["content-type"] = "application/json",
             ["access-control-allow-origin"] = Environment.GetEnvironmentVariable("ALLOWED_ORIGIN") ?? "*",
             ["access-control-allow-headers"] = "Content-Type,Authorization",
             ["access-control-allow-methods"] = "GET,POST,PUT,DELETE,OPTIONS",
-        },
-        Body = JsonSerializer.Serialize(body, JsonOptions),
-    };
+        };
+        if (correlationId is not null) headers["x-correlation-id"] = correlationId;
+
+        return new APIGatewayProxyResponse
+        {
+            StatusCode = statusCode,
+            Headers = headers,
+            Body = JsonSerializer.Serialize(body, JsonOptions),
+        };
+    }
+    
+    private static void Log(
+        ILambdaContext context,
+        string level,
+        string message,
+        string correlationId,
+        object? data = null
+    ) =>
+        context.Logger.LogLine(JsonSerializer.Serialize(new
+        {
+            level,
+            message,
+            correlationId,
+            data,
+            timestamp = DateTimeOffset.UtcNow,
+        }, JsonOptions));
 }
