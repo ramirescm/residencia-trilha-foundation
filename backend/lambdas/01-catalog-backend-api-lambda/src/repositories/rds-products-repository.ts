@@ -1,4 +1,7 @@
-import { Pool, type QueryResultRow } from "pg";
+import {
+  Pool,
+  type QueryResultRow,
+} from "../../node_modules/@types/pg/index.js";
 import type { Product, ProductsRepository } from "./types.js";
 
 const pool = new Pool({
@@ -79,7 +82,14 @@ export class RdsProductsRepository implements ProductsRepository {
   async update(product: Product): Promise<Product> {
     const result = await pool.query<ProductRow>(
       `UPDATE products SET name = $2, description = $3, price_cents = $4, stock = $5, image_key = $6 WHERE id = $1 RETURNING id, name, description, price_cents, stock, seller_id, image_key, created_at`,
-      [product.id, product.name, product.description, product.priceCents, product.stock, product.imageKeys[0] ?? null],
+      [
+        product.id,
+        product.name,
+        product.description,
+        product.priceCents,
+        product.stock,
+        product.imageKeys[0] ?? null,
+      ],
     );
     return mapProduct(result.rows[0]);
   }
