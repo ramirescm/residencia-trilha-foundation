@@ -2,8 +2,35 @@ import type { SQSBatchResponse, SQSEvent, SQSRecord } from "aws-lambda";
 import { getOrderProcessor } from "./processors/index.js";
 import type { OrderEvent } from "./processors/types.js";
 
-const required = (order: Record<string, unknown>, field: keyof OrderEvent): void => {
-  if (order[field] === undefined || order[field] === null || order[field] === "") {
+const log = (
+  level: "info" | "warn" | "error",
+  message: string,
+  correlationId: string,
+  data: Record<string, unknown> = {},
+) =>
+  console[level === "error" ? "error" : "log"](
+    JSON.stringify({
+      level,
+      message,
+      correlationId,
+      ...data,
+      timestamp: new Date().toISOString(),
+    }),
+  );
+
+const correlationIdFrom = (record: SQSRecord): string =>
+  record.messageAttributes?.correlationId?.stringValue ??
+  `missing-${record.messageId}`;
+
+const required = (
+  order: Record<string, unknown>,
+  field: keyof OrderEvent,
+): void => {
+  if (
+    order[field] === undefined ||
+    order[field] === null ||
+    order[field] === ""
+  ) {
     throw new Error(`Order event field ${field} is required.`);
   }
 };
@@ -28,18 +55,27 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
   const batchItemFailures: SQSBatchResponse["batchItemFailures"] = [];
 
   for (const record of event.Records) {
+    const correlationId = correlationIdFrom(record);
+
     try {
+      log("info", "order-processing-started", correlationId, {
+        messageId: record.messageId,
+        receiveCount: record.attributes.ApproximateReceiveCount,
+      });
+
       const order = parseOrder(record);
       const result = await processor.process(order);
-      console.info("order-processed", {
+
+      log("info", "order-processed", correlationId, {
         messageId: record.messageId,
         orderId: order.orderId,
         idempotencyKey: order.idempotencyKey,
         result,
       });
     } catch (error) {
-      const failure = error instanceof Error ? error : new Error("Unknown error");
-      console.error("order-processing-failed", {
+      const failure =
+        error instanceof Error ? error : new Error("Unknown error");
+      log("error", "order-processing-failed", correlationId, {
         messageId: record.messageId,
         message: failure.message,
         stack: failure.stack,
