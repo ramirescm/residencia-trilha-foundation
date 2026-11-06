@@ -1,0 +1,12 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionCode"],
+    "Resource": [
+      "arn:aws:lambda:REGION:ACCOUNT_ID:function:CATALOG_FUNCTION",
+      "arn:aws:lambda:REGION:ACCOUNT_ID:function:ORDER_API_FUNCTION",
+      "arn:aws:lambda:REGION:ACCOUNT_ID:function:ORDER_PROCESSOR_FUNCTION"
+    ]
+  }]
+}

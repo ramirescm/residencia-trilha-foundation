@@ -1,0 +1,149 @@
+# Workflow oficial de deploy do backend.
+name: Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: backend/lambdas/*/package-lock.json
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Gerar pacotes das Lambdas
+        run: bash backend/package.sh
+
+      - name: Validar código
+        run: |
+          npm --prefix backend/lambdas/01-catalog-backend-api-lambda run check
+          npm --prefix backend/lambdas/03-order-processor-lambda run check
+
+      - name: Executar testes com PostgreSQL local
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+          POSTGRES_BIN=/usr/lib/postgresql/16/bin bash backend/test-rds-local.sh
+
+      - name: Registrar versão e hashes dos pacotes
+        run: node backend/prepare-release.mjs release
+
+      - name: Salvar artefato do backend
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+    env:
+      CATALOG_FUNCTION: ${{ vars.CATALOG_FUNCTION }}
+      ORDER_API_FUNCTION: ${{ vars.ORDER_API_FUNCTION }}
+      ORDER_PROCESSOR_FUNCTION: ${{ vars.ORDER_PROCESSOR_FUNCTION }}
+
+    steps:
+
+      - name: Baixar artefato do backend
+        uses: actions/download-artifact@v4
+        with:
+          name: backend
+          path: release
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.BACKEND_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: backend-${{ github.run_id }}
+
+      - name: Conferir versão e hashes do artefato
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r '.sha' release/manifest.json)" = "$GITHUB_SHA"
+          for package in catalog.zip orders.zip processor.zip; do
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            actual=$(openssl dgst -sha256 -binary "release/$package" | openssl base64 -A)
+            test "$actual" = "$expected"
+          done
+
+      - name: Deploy da Lambda de catálogo
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$CATALOG_FUNCTION" \
+            --zip-file fileb://release/catalog.zip \
+            --query '{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus}' --output json
+
+          aws lambda wait function-updated-v2 --function-name "$CATALOG_FUNCTION"
+
+
+      - name: Deploy da Lambda de API de pedidos
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$ORDER_API_FUNCTION" \
+            --zip-file fileb://release/orders.zip \
+            --query '{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus}' --output json
+
+          aws lambda wait function-updated-v2 --function-name "$ORDER_API_FUNCTION"
+
+
+      - name: Deploy da Lambda de processador de pedidos
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$ORDER_PROCESSOR_FUNCTION" \
+            --zip-file fileb://release/processor.zip \
+            --query '{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus}' --output json
+
+          aws lambda wait function-updated-v2 --function-name "$ORDER_PROCESSOR_FUNCTION"
+
+
+      - name: Conferir hashes publicados
+        shell: bash
+        run: |
+          set -euo pipefail
+          for entry in "$CATALOG_FUNCTION:catalog.zip" "$ORDER_API_FUNCTION:orders.zip" "$ORDER_PROCESSOR_FUNCTION:processor.zip"; do
+            function_name="${entry%:*}"
+            package="${entry##*:}"
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            actual=$(aws lambda get-function-configuration --function-name "$function_name" --query CodeSha256 --output text)
+            test "$actual" = "$expected"
+            echo "Hash validado: $function_name"
+          done

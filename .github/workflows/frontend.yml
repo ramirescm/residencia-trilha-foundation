@@ -1,0 +1,100 @@
+# Workflow oficial de deploy do frontend.
+# Configure as Repository Variables indicadas no plano da Sprint 4.
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: site
+    env:
+      VITE_APP_MODE: production
+      VITE_AWS_REGION: ${{ vars.VITE_AWS_REGION }}
+      VITE_COGNITO_USER_POOL_ID: ${{ vars.VITE_COGNITO_USER_POOL_ID }}
+      VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
+      VITE_API_URL: ${{ vars.VITE_API_URL }}
+
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Gerar build
+        run: npm run build
+
+      - name: Registrar versão
+        run: node -e 'require("fs").writeFileSync("dist/release.json", JSON.stringify({sha:process.env.GITHUB_SHA,run:process.env.GITHUB_RUN_ID}))'
+
+      - name: Salvar artefato do frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend
+          path: site/dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    name: Deploy
+    needs: build
+    # A execução manual também deve selecionar a main, conforme a trust policy.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+    env:
+      FRONTEND_BUCKET: ${{ vars.FRONTEND_BUCKET }}
+      DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+
+    steps:
+      - name: Baixar artefato do frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend
+          path: dist
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: frontend-${{ github.run_id }}
+
+      - name: Publicar frontend no S3
+        run: aws s3 sync dist/ "s3://$FRONTEND_BUCKET/" --cache-control 'no-cache'
+
+      - name: Invalidar cache do CloudFront
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*' --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$invalidation_id"
+
+      - name: Validar versão publicada
+        run: |
+          curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/" -o /dev/null
+          curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/release.json" -o published-release.json
+          node -e 'const r=JSON.parse(require("fs").readFileSync("published-release.json","utf8")); if(r.sha!==process.env.GITHUB_SHA) throw new Error("Published SHA does not match this run"); console.log("Release verified:",r.sha)'

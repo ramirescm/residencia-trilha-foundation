@@ -209,3 +209,17 @@ npm --prefix site run build
 
 Os arquivos estáticos serão gerados em `site/dist` e poderão ser enviados para
 o bucket S3 da Sprint 1.
+
+## Sprint 4: pipelines e catch-up
+
+Os workflows oficiais estão em `.github/workflows/frontend.yml` e
+`.github/workflows/backend.yml`. As policies IAM e o guia estão em
+[infrastructure/ci-cd](infrastructure/ci-cd/README.md). O plano está dividido em
+configuração AWS/OIDC, pipeline do frontend e pipeline das três Lambdas.
+Configure as roles e Repository Variables antes de executar os workflows.
+Depois de publicados na main, eles executam nos pushes e por disparo manual.
+
+Para entrar na Sprint 4 com o resultado até a Sprint 3, consulte o
+[catch-up ready-for-sprint-04](infrastructure/catch-up/README.md).
+O comando `plan` valida localmente; `apply` cria/atualiza recursos pagos e
+precisa ser executado conscientemente na conta do laboratório.

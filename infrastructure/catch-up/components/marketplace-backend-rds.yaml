@@ -1,0 +1,419 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Catch-up ate a Sprint 3, preservando os recursos da Sprint 2 e acrescentando PostgreSQL privado.
+
+Parameters:
+  PostgresVersion:
+    Type: String
+    Description: Versao PostgreSQL 16 disponivel na regiao e suportada por RDS Proxy.
+  AllowedOrigin:
+    Type: String
+    Description: Origem HTTPS do frontend autorizada no CORS.
+
+Globals:
+  Function:
+    MemorySize: 256
+    Timeout: 15
+    Tracing: Active
+    VpcConfig:
+      SecurityGroupIds: [!Ref LambdaSG]
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+    Environment:
+      Variables:
+        DATA_SOURCE: rds
+        DB_HOST: !GetAtt DatabaseProxy.Endpoint
+        DB_NAME: marketplace
+        DB_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
+        DB_SSL: "true"
+        MARKETPLACE_TABLE_NAME: !Ref MarketplaceTable
+  Api:
+    TracingEnabled: true
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-web"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  MarketplaceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-marketplace"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ProductImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "residencia-fdn-images-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AllowedOrigin]
+            AllowedMethods: [GET, PUT]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+
+  OrderDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-order-events-dlq"
+      MessageRetentionPeriod: 1209600
+
+  OrderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-order-events"
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  MarketplaceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-rest-api"
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: !Sub "'${AllowedOrigin}'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  CatalogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: residencia-fdn-catalog-api
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.handler
+      CodeUri: ../../../backend/lambdas/01-catalog-backend-api-lambda/catalog-backend-api-lambda.zip
+      Environment:
+        Variables:
+          PRODUCT_IMAGES_BUCKET: !Ref ProductImagesBucket
+          UPLOAD_URL_TTL_SECONDS: "900"
+          DOWNLOAD_URL_TTL_SECONDS: "3600"
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+        - S3CrudPolicy:
+            BucketName: !Ref ProductImagesBucket
+      Events:
+        ListProducts:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /products, Method: GET }
+        CreateProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /products, Method: POST }
+        UpdateProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: "/products/{id}", Method: PUT }
+        DeleteProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: "/products/{id}", Method: DELETE }
+
+  OrderApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: residencia-fdn-order-api
+      Runtime: dotnet8
+      Architectures: [arm64]
+      Handler: Residencia.Foundation.Orders::Residencia.Foundation.Orders.Function::FunctionHandler
+      CodeUri: ../../../backend/lambdas/02-order-backend-api-lambda/order-backend-api-lambda.zip
+      Environment:
+        Variables:
+          ORDER_QUEUE_URL: !Ref OrderQueue
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrderQueue.QueueName
+      Events:
+        CreateOrder:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /orders, Method: POST }
+        ListBuyerOrders:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /orders, Method: GET }
+        ListSellerOrders:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /seller/orders, Method: GET }
+
+  OrderProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: residencia-fdn-order-processor
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.handler
+      CodeUri: ../../../backend/lambdas/03-order-processor-lambda/order-processor-lambda.zip
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+      Events:
+        OrderEvents:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.40.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.40.0.0/26
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.40.0.64/26
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+  PrivateRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  RouteA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetA, RouteTableId: !Ref PrivateRoutes }
+  RouteB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetB, RouteTableId: !Ref PrivateRoutes }
+  LambdaSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda clients; no inbound access
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+  ProxySG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL proxy from Lambda only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref LambdaSG }
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, DestinationSecurityGroupId: !Ref DatabaseSG }
+  LambdaToProxy:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSG
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref ProxySG
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database; inbound rule attached separately
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 1, ToPort: 1, CidrIp: 127.0.0.1/32 }
+  ProxyToDatabase:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSG
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref ProxySG
+  EndpointsSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTPS endpoints from Lambda only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref LambdaSG }
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PrivateRoutes]
+  DynamoEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PrivateRoutes]
+  SqsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sqs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointsSG]
+  SecretsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointsSG]
+  DatabaseSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private PostgreSQL subnets
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !Ref PostgresVersion
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: marketplace
+      MasterUsername: marketplace_admin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DatabaseSubnets
+      VPCSecurityGroups: [!Ref DatabaseSG]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      MultiAZ: false
+  ProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: rds.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadDatabaseSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+  DatabaseProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub ${AWS::StackName}-proxy
+      EngineFamily: POSTGRESQL
+      RequireTLS: true
+      RoleArn: !GetAtt ProxyRole.Arn
+      VpcSubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      VpcSecurityGroupIds: [!Ref ProxySG]
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: DISABLED
+          SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+  ProxyTargets:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref DatabaseProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers: [!Ref Database]
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 70
+        ConnectionBorrowTimeout: 30
+  SchemaFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: [ProxyTargets, SecretsEndpoint]
+    Properties:
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.handler
+      CodeUri: ../../../backend/schema/dist/
+      Timeout: 60
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !GetAtt Database.MasterUserSecret.SecretArn
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${MarketplaceApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  MarketplaceTableName:
+    Value: !Ref MarketplaceTable
+  ProductImagesBucketName:
+    Value: !Ref ProductImagesBucket
+  OrderQueueUrl:
+    Value: !Ref OrderQueue
+
+  CatalogFunctionName:
+    Value: !Ref CatalogFunction
+  OrderApiFunctionName:
+    Value: !Ref OrderApiFunction
+  OrderProcessorFunctionName:
+    Value: !Ref OrderProcessorFunction
+  SchemaFunctionName:
+    Value: !Ref SchemaFunction
+  DatabaseProxyEndpoint:
+    Value: !GetAtt DatabaseProxy.Endpoint
+  DatabaseSecretArn:
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  DatabaseProxyName:
+    Value: !Ref DatabaseProxy
