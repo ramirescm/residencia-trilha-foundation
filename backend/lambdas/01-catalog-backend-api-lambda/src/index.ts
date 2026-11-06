@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
   APIGatewayProxyEvent,
   APIGatewayProxyResult,
+  Context,
 } from "aws-lambda";
 import { getProductsRepository } from "./repositories/index.js";
 import type { ProductInput } from "./repositories/types.js";
@@ -34,16 +40,40 @@ class HttpError extends Error {
 
 const s3 = new S3Client({});
 
-const json = (statusCode: number, body: JsonBody): APIGatewayProxyResult => ({
+const json = (
+  statusCode: number,
+  body: JsonBody,
+  correlationId?: string,
+): APIGatewayProxyResult => ({
   statusCode,
   headers: {
     "content-type": "application/json",
     "access-control-allow-origin": process.env.ALLOWED_ORIGIN ?? "*",
     "access-control-allow-headers": "Content-Type,Authorization",
     "access-control-allow-methods": "GET,POST,PUT,DELETE,OPTIONS",
+    ...(correlationId && {
+      "x-correlation-id": correlationId,
+      "access-control-expose-headers": "x-correlation-id",
+    }),
   },
   body: JSON.stringify(body),
 });
+
+const log = (
+  level: "info" | "warn" | "error",
+  message: string,
+  correlationId: string,
+  data: Record<string, unknown> = {},
+) =>
+  console[level === "error" ? "error" : "log"](
+    JSON.stringify({
+      level,
+      message,
+      correlationId,
+      ...data,
+      timestamp: new Date().toISOString(),
+    }),
+  );
 
 const parseBody = (event: APIGatewayProxyEvent): ProductRequest => {
   if (!event.body) return {};
@@ -68,12 +98,21 @@ const requireUser = (event: APIGatewayProxyEvent): string => {
   return claims.sub;
 };
 
-const safeFileName = (value: string): string => value.replace(/[^a-zA-Z0-9._-]/g, "-");
+const safeFileName = (value: string): string =>
+  value.replace(/[^a-zA-Z0-9._-]/g, "-");
 
 const validateProduct = (input: ProductRequest) => {
-  if (!input.name || !Number.isInteger(input.priceCents) || (input.priceCents ?? 0) <= 0
-    || !Number.isInteger(input.stock) || (input.stock ?? -1) < 0) {
-    throw new HttpError("name, a positive priceCents and a non-negative stock are required.", 400);
+  if (
+    !input.name ||
+    !Number.isInteger(input.priceCents) ||
+    (input.priceCents ?? 0) <= 0 ||
+    !Number.isInteger(input.stock) ||
+    (input.stock ?? -1) < 0
+  ) {
+    throw new HttpError(
+      "name, a positive priceCents and a non-negative stock are required.",
+      400,
+    );
   }
 };
 
@@ -92,54 +131,86 @@ const createImageUploads = async ({
   sellerId: string;
   images?: ProductRequest["images"];
 }) => {
-  const validImages = (images ?? []).filter((image) => image.fileName).slice(0, 8);
+  const validImages = (images ?? [])
+    .filter((image) => image.fileName)
+    .slice(0, 8);
   if (validImages.length === 0) return [];
 
   const bucket = process.env.PRODUCT_IMAGES_BUCKET;
-  if (!bucket) throw new Error("PRODUCT_IMAGES_BUCKET is required for image uploads.");
+  if (!bucket)
+    throw new Error("PRODUCT_IMAGES_BUCKET is required for image uploads.");
 
   const expiresIn = Number(process.env.UPLOAD_URL_TTL_SECONDS ?? 900);
-  return Promise.all(validImages.map(async (image) => {
-    const key = `${sellerId}/${productId}/${randomUUID()}-${safeFileName(image.fileName as string)}`;
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      ContentType: image.contentType ?? "application/octet-stream",
-    });
-    return { bucket, key, expiresIn, uploadUrl: await getSignedUrl(s3, command, { expiresIn }) };
-  }));
+  return Promise.all(
+    validImages.map(async (image) => {
+      const key = `${sellerId}/${productId}/${randomUUID()}-${safeFileName(image.fileName as string)}`;
+      const command = new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ContentType: image.contentType ?? "application/octet-stream",
+      });
+      return {
+        bucket,
+        key,
+        expiresIn,
+        uploadUrl: await getSignedUrl(s3, command, { expiresIn }),
+      };
+    }),
+  );
 };
 
-const withImageUrls = async <T extends { imageKeys: string[]; imageKey?: string | null }>(product: T) => {
-  const imageKeys = product.imageKeys?.length ? product.imageKeys : product.imageKey ? [product.imageKey] : [];
-  if (imageKeys.length === 0) return { ...product, imageKeys: [], imageUrls: [] };
+const withImageUrls = async <
+  T extends { imageKeys: string[]; imageKey?: string | null },
+>(
+  product: T,
+) => {
+  const imageKeys = product.imageKeys?.length
+    ? product.imageKeys
+    : product.imageKey
+      ? [product.imageKey]
+      : [];
+  if (imageKeys.length === 0)
+    return { ...product, imageKeys: [], imageUrls: [] };
   const bucket = process.env.PRODUCT_IMAGES_BUCKET;
   if (!bucket) return { ...product, imageKeys, imageUrls: [] };
   const expiresIn = Number(process.env.DOWNLOAD_URL_TTL_SECONDS ?? 3600);
   return {
     ...product,
     imageKeys,
-    imageUrls: await Promise.all(imageKeys.map((key) => getSignedUrl(
-      s3, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn },
-    ))),
+    imageUrls: await Promise.all(
+      imageKeys.map((key) =>
+        getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key }), {
+          expiresIn,
+        }),
+      ),
+    ),
   };
 };
 
 export const handler = async (
   event: APIGatewayProxyEvent,
+  context: Context,
 ): Promise<APIGatewayProxyResult> => {
+  const correlationId = event.requestContext?.requestId ?? context.awsRequestId;
+  const reply = (statusCode: number, body: JsonBody) =>
+    json(statusCode, body, correlationId);
+
   try {
     const method = event.httpMethod;
     const path = event.path;
     if (!method || !path) {
       throw new Error("API Gateway Lambda proxy integration is required.");
     }
+    log("info", "catalog-request-received", correlationId, { method, path });
+
     const repository = await getProductsRepository();
 
     if (method === "GET" && path === "/products") {
       requireUser(event);
       const products = await repository.list();
-      return json(200, { items: await Promise.all(products.map(withImageUrls)) });
+      return reply(200, {
+        items: await Promise.all(products.map(withImageUrls)),
+      });
     }
 
     if (method === "POST" && path === "/products") {
@@ -164,7 +235,15 @@ export const handler = async (
         createdAt: new Date().toISOString(),
       };
 
-      return json(201, { product: await withImageUrls(await repository.create(product)), imageUploads });
+      const created = await repository.create(product);
+      log("info", "product-created", correlationId, {
+        productId: id,
+        sellerId,
+      });
+      return reply(201, {
+        product: await withImageUrls(created),
+        imageUploads,
+      });
     }
 
     const productId = productIdFrom(path);
@@ -172,42 +251,69 @@ export const handler = async (
       const userId = requireUser(event);
       const current = await repository.findById(productId);
       if (!current) throw new HttpError("Product not found.", 404);
-      if (current.sellerId !== userId) throw new HttpError("You can only edit your own products.", 403);
+      if (current.sellerId !== userId)
+        throw new HttpError("You can only edit your own products.", 403);
       const input = parseBody(event);
       validateProduct(input);
-      const imageUploads = await createImageUploads({ productId, sellerId: userId, images: input.images });
+      const imageUploads = await createImageUploads({
+        productId,
+        sellerId: userId,
+        images: input.images,
+      });
       const updated: ProductInput = {
         ...current,
         name: input.name as string,
         description: input.description ?? "",
         priceCents: input.priceCents as number,
         stock: input.stock as number,
-        imageKeys: [...current.imageKeys, ...imageUploads.map((upload) => upload.key)].slice(0, 8),
+        imageKeys: [
+          ...current.imageKeys,
+          ...imageUploads.map((upload) => upload.key),
+        ].slice(0, 8),
       };
-      return json(200, { product: await withImageUrls(await repository.update(updated)), imageUploads });
+      const saved = await repository.update(updated);
+      log("info", "product-updated", correlationId, { productId, userId });
+      return reply(200, { product: await withImageUrls(saved), imageUploads });
     }
 
     if (productId && method === "DELETE") {
       const userId = requireUser(event);
       const current = await repository.findById(productId);
       if (!current) throw new HttpError("Product not found.", 404);
-      if (current.sellerId !== userId) throw new HttpError("You can only remove your own products.", 403);
+      if (current.sellerId !== userId)
+        throw new HttpError("You can only remove your own products.", 403);
       await repository.remove(productId);
       if (current.imageKeys.length > 0 && process.env.PRODUCT_IMAGES_BUCKET) {
-        await Promise.all(current.imageKeys.map((key) => s3.send(new DeleteObjectCommand({
-          Bucket: process.env.PRODUCT_IMAGES_BUCKET,
-          Key: key,
-        }))));
+        await Promise.all(
+          current.imageKeys.map((key) =>
+            s3.send(
+              new DeleteObjectCommand({
+                Bucket: process.env.PRODUCT_IMAGES_BUCKET,
+                Key: key,
+              }),
+            ),
+          ),
+        );
       }
-      return json(200, { removed: true });
+      log("info", "product-removed", correlationId, { productId, userId });
+      return reply(200, { removed: true });
     }
 
-    return json(404, { message: "Route not found." });
+    return reply(404, { message: "Route not found." });
   } catch (error) {
     const failure = error instanceof Error ? error : new Error("Unknown error");
     const statusCode = error instanceof HttpError ? error.statusCode : 500;
-    console.error("catalog-request-failed", { message: failure.message, stack: failure.stack });
-    return json(statusCode, {
+    log(
+      statusCode >= 500 ? "error" : "warn",
+      "catalog-request-failed",
+      correlationId,
+      {
+        statusCode,
+        message: failure.message,
+        stack: statusCode >= 500 ? failure.stack : undefined,
+      },
+    );
+    return reply(statusCode, {
       message: statusCode === 500 ? "Internal server error." : failure.message,
     });
   }

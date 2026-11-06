@@ -12,15 +12,19 @@ const required = (name: string): string => {
 
 const getPool = (): Promise<Pool> => {
   if (pool) return pool;
-  pool = getDatabaseSecret().then((secret) => new Pool({
-    host: required("DB_HOST"),
-    port: Number(process.env.DB_PORT ?? 5432),
-    database: required("DB_NAME"),
-    user: secret.username,
-    password: secret.password,
-    ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
-    max: 2,
-  }));
+  pool = getDatabaseSecret().then(
+    (secret) =>
+      new Pool({
+        host: required("DB_HOST"),
+        port: Number(process.env.DB_PORT ?? 5432),
+        database: required("DB_NAME"),
+        user: secret.username,
+        password: secret.password,
+        ssl:
+          process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+        max: 2,
+      }),
+  );
   return pool;
 };
 
@@ -48,7 +52,9 @@ const mapProduct = (row: ProductRow): Product => ({
 
 export class RdsProductsRepository implements ProductsRepository {
   async list(): Promise<Product[]> {
-    const result = await (await getPool()).query<ProductRow>(`
+    const result = await (
+      await getPool()
+    ).query<ProductRow>(`
       SELECT id, name, description, price_cents, stock, seller_id, image_keys, created_at
       FROM products
       ORDER BY created_at DESC
@@ -58,7 +64,9 @@ export class RdsProductsRepository implements ProductsRepository {
   }
 
   async create(product: Product): Promise<Product> {
-    const result = await (await getPool()).query<ProductRow>(
+    const result = await (
+      await getPool()
+    ).query<ProductRow>(
       `
         INSERT INTO products (
           id, name, description, price_cents, stock, seller_id, image_keys, created_at
@@ -82,7 +90,9 @@ export class RdsProductsRepository implements ProductsRepository {
   }
 
   async findById(productId: string): Promise<Product | null> {
-    const result = await (await getPool()).query<ProductRow>(
+    const result = await (
+      await getPool()
+    ).query<ProductRow>(
       `SELECT id, name, description, price_cents, stock, seller_id, image_keys, created_at FROM products WHERE id = $1`,
       [productId],
     );
@@ -90,14 +100,25 @@ export class RdsProductsRepository implements ProductsRepository {
   }
 
   async update(product: Product): Promise<Product> {
-    const result = await (await getPool()).query<ProductRow>(
+    const result = await (
+      await getPool()
+    ).query<ProductRow>(
       `UPDATE products SET name = $2, description = $3, price_cents = $4, stock = $5, image_keys = $6::jsonb, updated_at = NOW() WHERE id = $1 RETURNING id, name, description, price_cents, stock, seller_id, image_keys, created_at`,
-      [product.id, product.name, product.description, product.priceCents, product.stock, JSON.stringify(product.imageKeys)],
+      [
+        product.id,
+        product.name,
+        product.description,
+        product.priceCents,
+        product.stock,
+        JSON.stringify(product.imageKeys),
+      ],
     );
     return mapProduct(result.rows[0]);
   }
 
   async remove(productId: string): Promise<void> {
-    await (await getPool()).query("DELETE FROM products WHERE id = $1", [productId]);
+    await (
+      await getPool()
+    ).query("DELETE FROM products WHERE id = $1", [productId]);
   }
 }

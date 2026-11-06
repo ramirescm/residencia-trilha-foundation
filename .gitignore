@@ -10,3 +10,4 @@ obj/
 .env.local
 .DS_Store
 *.log
+.idea/
