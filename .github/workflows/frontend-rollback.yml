@@ -1,0 +1,117 @@
+# Rollback do frontend pelo artefato original: republica os bytes de uma
+# release preservada pelo frontend.yml, sem checkout e sem rebuild.
+name: Frontend rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Tag da release preservada, por exemplo frontend-44806906209"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Mesmo grupo do deploy normal: rollback e deploy nunca rodam juntos.
+concurrency:
+  group: frontend-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Republicar release
+    # Aprovação manual e restrição à main vêm do environment production,
+    # o mesmo que a trust policy da role exige (...:environment:production).
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ vars.FRONTEND_URL }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE: ${{ inputs.release }}
+      FRONTEND_BUCKET: ${{ vars.FRONTEND_BUCKET }}
+      DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+
+    steps:
+      - name: Validar a tag informada
+        run: |
+          [[ "$RELEASE" =~ ^frontend-[0-9]+$ ]] || { echo "::error::Tag inválida: $RELEASE"; exit 1; }
+
+      - name: Registrar versão no ar antes do rollback
+        run: |
+          curl --fail --silent --show-error "${FRONTEND_URL%/}/release.json" -o before.json
+          echo "Antes do rollback: $(cat before.json)"
+
+      - name: Baixar a release preservada
+        run: |
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --dir release
+          ls -l release
+
+      - name: Verificar attestation do build original
+        run: |
+          for f in release/frontend.tar.gz release/SHA256SUMS; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/frontend.yml"
+          done
+
+      - name: Conferir hashes e extrair sem rebuild
+        run: |
+          (cd release && sha256sum -c frontend.tar.gz.sha256)
+          mkdir dist && tar -xzf release/frontend.tar.gz -C dist
+          (cd dist && sha256sum -c ../release/SHA256SUMS)
+          echo "release.json do pacote: $(cat dist/release.json)"
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: frontend-rollback-${{ github.run_id }}
+
+      # cp --recursive reenvia todos os arquivos. O sync compara tamanho e data
+      # e poderia pular um arquivo de mesmo tamanho com conteúdo diferente.
+      - name: Republicar no S3
+        run: aws s3 cp dist/ "s3://$FRONTEND_BUCKET/" --recursive --cache-control 'no-cache' --no-progress
+
+      - name: Invalidar cache do CloudFront
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*' --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$invalidation_id"
+          echo "Invalidação concluída: $invalidation_id"
+
+      - name: Comparar bytes servidos com o pacote
+        run: |
+          fail=0
+          : > served.sha256
+          while read -r expected path; do
+            got=$(curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/${path#./}" | sha256sum | cut -d' ' -f1)
+            echo "$got  $path" >> served.sha256
+            if [ "$got" = "$expected" ]; then echo "OK    $path"; else echo "FALHA $path (esperado $expected, servido $got)"; fail=1; fi
+          done < release/SHA256SUMS
+          diff release/SHA256SUMS served.sha256 && echo "Todos os $(wc -l < served.sha256) arquivos servidos conferem com o SHA256SUMS da release $RELEASE"
+          exit $fail
+
+      - name: Resumo antes e depois
+        run: |
+          curl --fail --silent --show-error "${FRONTEND_URL%/}/release.json" -o after.json
+          {
+            echo "## Rollback do frontend para \`$RELEASE\`"
+            echo
+            echo "| | release.json servido |"
+            echo "| --- | --- |"
+            echo "| Antes | \`$(cat before.json)\` |"
+            echo "| Depois | \`$(cat after.json)\` |"
+            echo
+            echo "frontend.tar.gz: \`$(cut -d' ' -f1 release/frontend.tar.gz.sha256)\` (attestation verificada)"
+            echo
+            echo "Arquivos servidos iguais ao SHA256SUMS: $(wc -l < served.sha256). Nenhum rebuild: o \`run\` acima é o do build original."
+          } >> "$GITHUB_STEP_SUMMARY"
+          cmp -s after.json dist/release.json && echo "release.json servido = release.json do pacote: $(cat after.json)"

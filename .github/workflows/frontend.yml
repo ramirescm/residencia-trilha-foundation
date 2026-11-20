@@ -19,6 +19,10 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write      # assinatura Sigstore da attestation
+      attestations: write
     defaults:
       run:
         working-directory: site
@@ -49,11 +53,27 @@ jobs:
       - name: Registrar versão
         run: node -e 'require("fs").writeFileSync("dist/release.json", JSON.stringify({sha:process.env.GITHUB_SHA,run:process.env.GITHUB_RUN_ID}))'
 
+      # Pacote imutável da release: é ele que vai ao ar agora e que o
+      # frontend-rollback.yml republica depois, sem rebuild.
+      - name: Empacotar release
+        run: |
+          mkdir -p ../release
+          (cd dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > ../release/SHA256SUMS
+          tar --sort=name --mtime='UTC 2000-01-01' --owner=0 --group=0 --numeric-owner -C dist -cf - . | gzip -n > ../release/frontend.tar.gz
+          (cd ../release && sha256sum frontend.tar.gz > frontend.tar.gz.sha256 && cat frontend.tar.gz.sha256)
+
+      - name: Atestar a release
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/frontend.tar.gz
+            release/SHA256SUMS
+
       - name: Salvar artefato do frontend
         uses: actions/upload-artifact@v4
         with:
           name: frontend
-          path: site/dist/
+          path: release/
           if-no-files-found: error
           retention-days: 14
 
@@ -80,7 +100,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: frontend
-          path: dist
+          path: release
+
+      - name: Conferir e extrair o pacote
+        run: |
+          (cd release && sha256sum -c frontend.tar.gz.sha256)
+          mkdir dist && tar -xzf release/frontend.tar.gz -C dist
+          (cd dist && sha256sum --quiet -c ../release/SHA256SUMS)
 
       - name: Autenticar na AWS usando OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -102,3 +128,38 @@ jobs:
           curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/" -o /dev/null
           curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/release.json" -o published-release.json
           node -e 'const r=JSON.parse(require("fs").readFileSync("published-release.json","utf8")); if(r.sha!==process.env.GITHUB_SHA) throw new Error("Published SHA does not match this run"); console.log("Release verified:",r.sha)'
+
+  # Guarda só o que foi aprovado e publicado. A GitHub Release não expira,
+  # ao contrário do artefato (14 dias).
+  preserve:
+    name: Preservar release
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: frontend-${{ github.run_id }}
+    steps:
+      - name: Baixar artefato do frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend
+          path: release
+
+      - name: Criar GitHub Release
+        run: |
+          tar -xzf release/frontend.tar.gz -O ./release.json > release-info.json
+          gh release create "$TAG" release/frontend.tar.gz release/SHA256SUMS release/frontend.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Frontend ${GITHUB_SHA::7} (run $GITHUB_RUN_ID)" \
+            --notes "Release do frontend aprovada e publicada pelo run $GITHUB_RUN_ID.
+
+          - commit: \`$GITHUB_SHA\`
+          - frontend.tar.gz: \`$(cut -d' ' -f1 release/frontend.tar.gz.sha256)\`
+          - release.json: \`$(cat release-info.json)\`
+
+          Para republicar estes bytes: Actions › Frontend rollback › release = \`$TAG\`."
+          echo "Release preservada: $TAG" >> "$GITHUB_STEP_SUMMARY"
+
