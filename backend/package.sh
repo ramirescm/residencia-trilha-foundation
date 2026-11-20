@@ -19,7 +19,7 @@ orders_publish_dir="${orders_dir}/dist"
 rm -rf "${orders_publish_dir}"
 dotnet publish "${orders_dir}/OrderBackendApi.csproj" \
   --configuration Release \
-  --runtime linux-arm64 --self-contained false \
+  --runtime linux-x64 --self-contained false \
   --output "${orders_publish_dir}"
 rm -f "${orders_dir}/order-backend-api-lambda.zip"
 (
