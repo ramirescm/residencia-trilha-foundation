@@ -115,8 +115,11 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: frontend-${{ github.run_id }}
 
+      # cp --recursive reenvia todos os arquivos. O pacote tem data fixa
+      # (build reproduzível), então o sync acharia que nada mudou e pularia
+      # arquivos de mesmo tamanho, como o release.json.
       - name: Publicar frontend no S3
-        run: aws s3 sync dist/ "s3://$FRONTEND_BUCKET/" --cache-control 'no-cache'
+        run: aws s3 cp dist/ "s3://$FRONTEND_BUCKET/" --recursive --cache-control 'no-cache' --no-progress
 
       - name: Invalidar cache do CloudFront
         run: |
