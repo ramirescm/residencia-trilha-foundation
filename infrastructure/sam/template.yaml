@@ -154,6 +154,13 @@ Resources:
 
   OrderApiFunction:
     Type: AWS::Serverless::Function
+    # dotnet8 foi depreciado em 2026-11-10 (criação bloqueada em 2027-02-01,
+    # update em 2027-03-03). Mantido igual à produção; a migração para dotnet10
+    # é uma mudança de código fora deste opcional.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W2531]
     Properties:
       FunctionName: !Sub "${AWS::StackName}-order-api"
       Runtime: dotnet8
