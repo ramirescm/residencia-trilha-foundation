@@ -195,7 +195,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: Authenticated
             {error && <p className="form-error">{error}</p>}<button className="submit-button" disabled={loading}><span>Ativar acesso</span><b>→</b></button>
           </form>}
         </div>
-        <div className="panel-footer"><span>JWT protegido</span><span>Foundation / Sprint 02</span></div>
+        <div className="panel-footer"><span>JWT protegido</span><span>Foundation / Sprint 04 · release B</span></div>
       </section>
     </main>
   );
