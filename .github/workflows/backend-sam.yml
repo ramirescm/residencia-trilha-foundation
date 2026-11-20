@@ -1,0 +1,154 @@
+# Opcional: deploy das Lambdas por uma stack SAM própria (ambiente isolado
+# sam-lab). Não toca nas Lambdas, VPC ou banco do ambiente principal, que
+# continuam sendo publicados pelo backend.yml.
+name: Backend SAM (lab)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "infrastructure/sam/**"
+      - ".github/workflows/backend-sam.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-sam-lab
+  cancel-in-progress: false
+
+env:
+  STACK_NAME: residencia-foundation-sam-lab
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: backend/lambdas/*/package-lock.json
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Gerar pacotes das Lambdas
+        run: bash backend/package.sh
+
+      - name: Validar código
+        run: |
+          npm --prefix backend/lambdas/01-catalog-backend-api-lambda run check
+          npm --prefix backend/lambdas/03-order-processor-lambda run check
+
+      - name: Registrar versão e hashes dos pacotes
+        run: node backend/prepare-release.mjs release
+
+      - name: Configurar AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Validar template
+        run: sam validate --lint --template-file infrastructure/sam/template.yaml --region "${{ vars.AWS_REGION }}"
+
+      - name: Salvar artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-sam
+          path: |
+            release/
+            infrastructure/sam/
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy:
+    name: Deploy (sam-lab)
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    # Sem reviewer: o environment só aceita a main. A trust policy da role
+    # confia apenas em ...:environment:sam-lab.
+    environment: sam-lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Baixar artefato
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-sam
+          path: .
+
+      - name: Conferir versão e hashes dos pacotes
+        run: |
+          set -euo pipefail
+          test "$(jq -r '.sha' release/manifest.json)" = "$GITHUB_SHA"
+          for package in catalog.zip orders.zip processor.zip; do
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            actual=$(openssl dgst -sha256 -binary "release/$package" | openssl base64 -A)
+            test "$actual" = "$expected" && echo "OK $package $actual"
+          done
+
+      - name: Configurar AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.SAM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: backend-sam-${{ github.run_id }}
+
+      - name: Versões publicadas antes do deploy
+        run: |
+          for f in catalog order-api order-processor; do
+            aws lambda get-alias --function-name "$STACK_NAME-$f" --name live \
+              --query '{Funcao:AliasArn,Versao:FunctionVersion}' --output text 2>/dev/null \
+              || echo "$STACK_NAME-$f: ainda não existe"
+          done
+
+      # A pipeline só cria e executa o change set. Quem cria e altera os
+      # recursos é a role de execução do CloudFormation (--role-arn).
+      - name: Deploy da stack com SAM
+        run: |
+          sam deploy \
+            --template-file infrastructure/sam/template.yaml \
+            --stack-name "$STACK_NAME" \
+            --s3-bucket "${{ vars.SAM_ARTIFACTS_BUCKET }}" \
+            --s3-prefix "$STACK_NAME/$GITHUB_SHA" \
+            --role-arn "${{ vars.SAM_CFN_EXEC_ROLE_ARN }}" \
+            --capabilities CAPABILITY_IAM \
+            --parameter-overrides "ReleaseSha=$GITHUB_SHA" "PermissionsBoundaryArn=${{ vars.SAM_BOUNDARY_ARN }}" \
+            --tags residencia-env=sam-lab "release=$GITHUB_SHA" \
+            --no-confirm-changeset --no-fail-on-empty-changeset --no-progressbar
+
+      - name: Conferir versões e hashes publicados
+        run: |
+          set -euo pipefail
+          for entry in catalog:catalog.zip order-api:orders.zip order-processor:processor.zip; do
+            fn="$STACK_NAME-${entry%%:*}"; package=${entry##*:}
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            version=$(aws lambda get-alias --function-name "$fn" --name live --query FunctionVersion --output text)
+            read -r actual description < <(aws lambda get-function-configuration --function-name "$fn" --qualifier live \
+              --query '[CodeSha256,Description]' --output text)
+            test "$actual" = "$expected"
+            test "$description" = "sam-lab release $GITHUB_SHA"
+            echo "Hash validado: $fn:live -> versão $version, $actual ($description)"
+          done
+
+      - name: Smoke test pela API do lab
+        run: bash infrastructure/sam/smoke-test.sh "$STACK_NAME"

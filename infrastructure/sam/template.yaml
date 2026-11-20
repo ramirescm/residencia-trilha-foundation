@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Ambiente isolado (sam-lab) das Lambdas da Trilha Foundation, gerenciado por
+  uma stack própria. Não usa nem altera a VPC, o banco ou as Lambdas do
+  ambiente principal. Todos os nomes começam com o nome da stack.
+
+# Deploy: .github/workflows/backend-sam.yml (stack residencia-foundation-sam-lab).
+# Os CodeUri apontam para os ZIPs gerados por backend/package.sh e copiados por
+# backend/prepare-release.mjs para release/ na raiz do repositório.
+
+Parameters:
+  ReleaseSha:
+    Type: String
+    Description: Commit publicado. Vai na descrição de cada versão das funções.
+    AllowedPattern: "^[0-9a-f]{40}$"
+  PermissionsBoundaryArn:
+    Type: String
+    Description: Boundary obrigatório nas roles das funções (criado pelo bootstrap).
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: Origem autorizada no CORS (o lab não tem frontend próprio).
+
+Globals:
+  Function:
+    Architectures: [x86_64]
+    PermissionsBoundary: !Ref PermissionsBoundaryArn
+    # As roles geradas pelo SAM ficam em /sam-lab/: é por esse path que a role
+    # de execução do CloudFormation pode criá-las (o nome é truncado pelo CFN).
+    RolePath: /sam-lab/
+    AutoPublishAlias: live
+    Description: !Sub "sam-lab release ${ReleaseSha}"
+    Environment:
+      Variables:
+        DATA_SOURCE: dynamodb
+        MARKETPLACE_TABLE_NAME: !Ref MarketplaceTable
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      UserPoolTags:
+        residencia-env: sam-lab
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-smoke"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      # ADMIN_USER_PASSWORD_AUTH só para o smoke test da pipeline, que cria e
+      # apaga um usuário temporário a cada deploy.
+      ExplicitAuthFlows:
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  MarketplaceTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-marketplace"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  ProductImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  OrderDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-order-events-dlq"
+      MessageRetentionPeriod: 1209600
+
+  OrderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-order-events"
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # REST API (não HTTP API): o código lê event.httpMethod e
+  # requestContext.authorizer.claims, que é o formato do REST com Cognito.
+  MarketplaceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-rest-api"
+      StageName: lab
+      Tags:
+        residencia-env: sam-lab
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  CatalogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-catalog"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 3
+      CodeUri: ../../release/catalog.zip
+      Environment:
+        Variables:
+          PRODUCT_IMAGES_BUCKET: !Ref ProductImagesBucket
+          UPLOAD_URL_TTL_SECONDS: "900"
+          DOWNLOAD_URL_TTL_SECONDS: "3600"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+        - S3CrudPolicy:
+            BucketName: !Ref ProductImagesBucket
+      Events:
+        ListProducts:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /products, Method: GET }
+        CreateProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /products, Method: POST }
+        UpdateProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: "/products/{id}", Method: PUT }
+        DeleteProduct:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: "/products/{id}", Method: DELETE }
+
+  OrderApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-order-api"
+      Runtime: dotnet8
+      Handler: Residencia.Foundation.Orders::Residencia.Foundation.Orders.Function::FunctionHandler
+      MemorySize: 512
+      Timeout: 15
+      CodeUri: ../../release/orders.zip
+      Environment:
+        Variables:
+          ORDER_QUEUE_URL: !Ref OrderQueue
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrderQueue.QueueName
+      Events:
+        CreateOrder:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /orders, Method: POST }
+        ListBuyerOrders:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /orders, Method: GET }
+        ListSellerOrders:
+          Type: Api
+          Properties: { RestApiId: !Ref MarketplaceApi, Path: /seller/orders, Method: GET }
+
+  OrderProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-order-processor"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 15
+      CodeUri: ../../release/processor.zip
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MarketplaceTable
+      Events:
+        OrderEvents:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+Outputs:
+  ApiUrl:
+    Value: !Sub "https://${MarketplaceApi}.execute-api.${AWS::Region}.amazonaws.com/lab"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  MarketplaceTableName:
+    Value: !Ref MarketplaceTable
+  OrderQueueUrl:
+    Value: !Ref OrderQueue
+  CatalogFunctionName:
+    Value: !Ref CatalogFunction
+  OrderApiFunctionName:
+    Value: !Ref OrderApiFunction
+  OrderProcessorFunctionName:
+    Value: !Ref OrderProcessorFunction

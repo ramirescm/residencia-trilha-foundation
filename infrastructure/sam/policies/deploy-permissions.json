@@ -1,0 +1,66 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageOnlyTheLabStack",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateChangeSet", "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet",
+        "cloudformation:DescribeChangeSet", "cloudformation:ListChangeSets",
+        "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResource", "cloudformation:DescribeStackResources",
+        "cloudformation:ListStackResources", "cloudformation:GetTemplate", "cloudformation:GetTemplateSummary"
+      ],
+      "Resource": "arn:aws:cloudformation:__REGION__:__ACCOUNT_ID__:stack/residencia-foundation-sam-lab/*"
+    },
+    {
+      "Sid": "UseSamTransform",
+      "Effect": "Allow",
+      "Action": "cloudformation:CreateChangeSet",
+      "Resource": "arn:aws:cloudformation:__REGION__:aws:transform/Serverless-2016-10-31"
+    },
+    {
+      "Sid": "TemplateChecks",
+      "Effect": "Allow",
+      "Action": ["cloudformation:ValidateTemplate", "cloudformation:GetTemplateSummary"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "HandResourceChangesToCloudFormation",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/residencia-foundation-sam-cfn-exec",
+      "Condition": { "StringEquals": { "iam:PassedToService": "cloudformation.amazonaws.com" } }
+    },
+    {
+      "Sid": "UploadArtifacts",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::residencia-foundation-sam-artifacts-__ACCOUNT_ID__/*"
+    },
+    {
+      "Sid": "ListArtifactsBucket",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::residencia-foundation-sam-artifacts-__ACCOUNT_ID__"
+    },
+    {
+      "Sid": "VerifyLabFunctions",
+      "Effect": "Allow",
+      "Action": ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:GetAlias", "lambda:ListAliases", "lambda:ListVersionsByFunction"],
+      "Resource": "arn:aws:lambda:__REGION__:__ACCOUNT_ID__:function:residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "SmokeTestUser",
+      "Effect": "Allow",
+      "Action": ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminInitiateAuth", "cognito-idp:AdminDeleteUser"],
+      "Resource": "arn:aws:cognito-idp:__REGION__:__ACCOUNT_ID__:userpool/*"
+    },
+    {
+      "Sid": "NeverTouchProductionUserPool",
+      "Effect": "Deny",
+      "Action": "cognito-idp:*",
+      "Resource": "arn:aws:cognito-idp:__REGION__:__ACCOUNT_ID__:userpool/__PROD_USER_POOL_ID__"
+    }
+  ]
+}

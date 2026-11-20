@@ -1,0 +1,159 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LabFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction", "lambda:DeleteFunction", "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration", "lambda:PublishVersion", "lambda:DeleteFunctionConcurrency",
+        "lambda:CreateAlias", "lambda:UpdateAlias", "lambda:DeleteAlias",
+        "lambda:AddPermission", "lambda:RemovePermission",
+        "lambda:TagResource", "lambda:UntagResource",
+        "lambda:Get*", "lambda:List*"
+      ],
+      "Resource": "arn:aws:lambda:__REGION__:__ACCOUNT_ID__:function:residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "LabEventSourceMappingsWrite",
+      "Effect": "Allow",
+      "Action": ["lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping", "lambda:DeleteEventSourceMapping"],
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": { "lambda:FunctionArn": "arn:aws:lambda:__REGION__:__ACCOUNT_ID__:function:residencia-foundation-sam-lab-*" }
+      }
+    },
+    {
+      "Sid": "EventSourceMappingsRead",
+      "Effect": "Allow",
+      "Action": ["lambda:GetEventSourceMapping", "lambda:ListEventSourceMappings"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateLabRolesOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": ["iam:CreateRole", "iam:PutRolePermissionsBoundary"],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/sam-lab/*",
+      "Condition": {
+        "StringEquals": { "iam:PermissionsBoundary": "arn:aws:iam::__ACCOUNT_ID__:policy/residencia-foundation-sam-lab-boundary" }
+      }
+    },
+    {
+      "Sid": "ManageLabRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole", "iam:DeleteRole", "iam:TagRole", "iam:UntagRole", "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:GetRolePolicy",
+        "iam:ListRolePolicies", "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/sam-lab/*"
+    },
+    {
+      "Sid": "AttachOnlyLambdaManagedPolicies",
+      "Effect": "Allow",
+      "Action": ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/sam-lab/*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "PassLabRolesToLambda",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/sam-lab/*",
+      "Condition": { "StringEquals": { "iam:PassedToService": "lambda.amazonaws.com" } }
+    },
+    {
+      "Sid": "NeverRemoveBoundary",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "LabTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable", "dynamodb:DeleteTable", "dynamodb:UpdateTable", "dynamodb:DescribeTable",
+        "dynamodb:TagResource", "dynamodb:UntagResource", "dynamodb:ListTagsOfResource",
+        "dynamodb:DescribeContinuousBackups", "dynamodb:UpdateContinuousBackups",
+        "dynamodb:DescribeTimeToLive", "dynamodb:UpdateTimeToLive",
+        "dynamodb:DescribeContributorInsights", "dynamodb:DescribeKinesisStreamingDestination"
+      ],
+      "Resource": "arn:aws:dynamodb:__REGION__:__ACCOUNT_ID__:table/residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "LabQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue", "sqs:DeleteQueue", "sqs:GetQueueAttributes", "sqs:SetQueueAttributes",
+        "sqs:GetQueueUrl", "sqs:TagQueue", "sqs:UntagQueue", "sqs:ListQueueTags"
+      ],
+      "Resource": "arn:aws:sqs:__REGION__:__ACCOUNT_ID__:residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "LabImagesBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucket*", "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketTagging", "s3:PutBucketOwnershipControls", "s3:PutEncryptionConfiguration",
+        "s3:GetEncryptionConfiguration", "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::residencia-foundation-sam-lab-images-*"
+    },
+    {
+      "Sid": "ReadArtifactsForLambdaCode",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::residencia-foundation-sam-artifacts-__ACCOUNT_ID__/*"
+    },
+    {
+      "Sid": "RestApis",
+      "Effect": "Allow",
+      "Action": ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE"],
+      "Resource": [
+        "arn:aws:apigateway:__REGION__::/restapis",
+        "arn:aws:apigateway:__REGION__::/restapis/*",
+        "arn:aws:apigateway:__REGION__::/tags/*"
+      ]
+    },
+    {
+      "Sid": "NeverTouchProductionApi",
+      "Effect": "Deny",
+      "Action": ["apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE"],
+      "Resource": [
+        "arn:aws:apigateway:__REGION__::/restapis/__PROD_REST_API_ID__",
+        "arn:aws:apigateway:__REGION__::/restapis/__PROD_REST_API_ID__/*"
+      ]
+    },
+    {
+      "Sid": "CreateUserPool",
+      "Effect": "Allow",
+      "Action": "cognito-idp:CreateUserPool",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManageUserPools",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:DeleteUserPool", "cognito-idp:DescribeUserPool", "cognito-idp:UpdateUserPool",
+        "cognito-idp:SetUserPoolMfaConfig", "cognito-idp:GetUserPoolMfaConfig",
+        "cognito-idp:CreateUserPoolClient", "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:DeleteUserPoolClient", "cognito-idp:DescribeUserPoolClient",
+        "cognito-idp:TagResource", "cognito-idp:UntagResource", "cognito-idp:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:cognito-idp:__REGION__:__ACCOUNT_ID__:userpool/*"
+    },
+    {
+      "Sid": "NeverTouchProductionUserPool",
+      "Effect": "Deny",
+      "Action": "cognito-idp:*",
+      "Resource": "arn:aws:cognito-idp:__REGION__:__ACCOUNT_ID__:userpool/__PROD_USER_POOL_ID__"
+    }
+  ]
+}

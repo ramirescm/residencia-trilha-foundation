@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:__REGION__:__ACCOUNT_ID__:log-group:/aws/lambda/residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "LabTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+        "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem", "dynamodb:TransactWriteItems", "dynamodb:TransactGetItems",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:__REGION__:__ACCOUNT_ID__:table/residencia-foundation-sam-lab-*",
+        "arn:aws:dynamodb:__REGION__:__ACCOUNT_ID__:table/residencia-foundation-sam-lab-*/index/*"
+      ]
+    },
+    {
+      "Sid": "LabQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"
+      ],
+      "Resource": "arn:aws:sqs:__REGION__:__ACCOUNT_ID__:residencia-foundation-sam-lab-*"
+    },
+    {
+      "Sid": "LabImagesBucket",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation", "s3:GetLifecycleConfiguration", "s3:PutLifecycleConfiguration", "s3:DeleteObjectVersion", "s3:ListBucketVersions", "s3:GetObjectVersion", "s3:ListBucketMultipartUploads", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+      "Resource": [
+        "arn:aws:s3:::residencia-foundation-sam-lab-images-*",
+        "arn:aws:s3:::residencia-foundation-sam-lab-images-*/*"
+      ]
+    }
+  ]
+}
