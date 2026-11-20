@@ -68,11 +68,15 @@ jobs:
   deploy:
     name: Deploy
     needs: build
+    # Aprovação manual: o environment exige reviewer e só aceita a main.
+    # A trust policy da role confia apenas em ...:environment:production.
     if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       id-token: write
+      contents: read
     env:
       CATALOG_FUNCTION: ${{ vars.CATALOG_FUNCTION }}
       ORDER_API_FUNCTION: ${{ vars.ORDER_API_FUNCTION }}

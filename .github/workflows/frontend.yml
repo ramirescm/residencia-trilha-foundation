@@ -60,8 +60,12 @@ jobs:
   deploy:
     name: Deploy
     needs: build
-    # A execução manual também deve selecionar a main, conforme a trust policy.
+    # Aprovação manual: o environment exige reviewer e só aceita a main.
+    # A trust policy da role confia apenas em ...:environment:production.
     if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ vars.FRONTEND_URL }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
