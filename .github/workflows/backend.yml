@@ -26,14 +26,14 @@ jobs:
       - name: Configurar Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
           cache-dependency-path: backend/lambdas/*/package-lock.json
 
       - name: Configurar .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: "8.0.x"
 
       - name: Gerar pacotes das Lambdas
         run: bash backend/package.sh
@@ -46,8 +46,13 @@ jobs:
       - name: Executar testes com PostgreSQL local
         run: |
           sudo apt-get update
+          sudo apt-get install -y postgresql-common ca-certificates
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+          sudo apt-get update
           sudo apt-get install -y postgresql-16
-          POSTGRES_BIN=/usr/lib/postgresql/16/bin bash backend/test-rds-local.sh
+
+          POSTGRES_BIN=/usr/lib/postgresql/16/bin \
+            bash backend/test-rds-local.sh
 
       - name: Registrar versão e hashes dos pacotes
         run: node backend/prepare-release.mjs release
@@ -74,7 +79,6 @@ jobs:
       ORDER_PROCESSOR_FUNCTION: ${{ vars.ORDER_PROCESSOR_FUNCTION }}
 
     steps:
-
       - name: Baixar artefato do backend
         uses: actions/download-artifact@v4
         with:
@@ -110,7 +114,6 @@ jobs:
 
           aws lambda wait function-updated-v2 --function-name "$CATALOG_FUNCTION"
 
-
       - name: Deploy da Lambda de API de pedidos
         shell: bash
         run: |
@@ -122,7 +125,6 @@ jobs:
 
           aws lambda wait function-updated-v2 --function-name "$ORDER_API_FUNCTION"
 
-
       - name: Deploy da Lambda de processador de pedidos
         shell: bash
         run: |
@@ -133,7 +135,6 @@ jobs:
             --query '{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus}' --output json
 
           aws lambda wait function-updated-v2 --function-name "$ORDER_PROCESSOR_FUNCTION"
-
 
       - name: Conferir hashes publicados
         shell: bash
