@@ -2,6 +2,12 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "ExpandSamTransform",
+      "Effect": "Allow",
+      "Action": "cloudformation:CreateChangeSet",
+      "Resource": "arn:aws:cloudformation:__REGION__:aws:transform/Serverless-2016-10-31"
+    },
+    {
       "Sid": "LabFunctions",
       "Effect": "Allow",
       "Action": [
@@ -22,6 +28,12 @@
       "Condition": {
         "ArnLike": { "lambda:FunctionArn": "arn:aws:lambda:__REGION__:__ACCOUNT_ID__:function:residencia-foundation-sam-lab-*" }
       }
+    },
+    {
+      "Sid": "TagEventSourceMappings",
+      "Effect": "Allow",
+      "Action": ["lambda:TagResource", "lambda:UntagResource", "lambda:ListTags"],
+      "Resource": "arn:aws:lambda:__REGION__:__ACCOUNT_ID__:event-source-mapping:*"
     },
     {
       "Sid": "EventSourceMappingsRead",

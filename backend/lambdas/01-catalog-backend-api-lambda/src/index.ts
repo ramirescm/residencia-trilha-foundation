@@ -139,7 +139,11 @@ export const handler = async (
     if (method === "GET" && path === "/products") {
       requireUser(event);
       const products = await repository.list();
-      return json(200, { items: await Promise.all(products.map(withImageUrls)) });
+      // release: commit publicado (definido só no sam-lab; omitido quando ausente).
+      return json(200, {
+        items: await Promise.all(products.map(withImageUrls)),
+        release: process.env.RELEASE_SHA,
+      });
     }
 
     if (method === "POST" && path === "/products") {

@@ -38,6 +38,8 @@ call() { # método, caminho, [corpo]
 
 echo "Sem token a API recusa: HTTP $(curl -s -o /dev/null -w '%{http_code}' "${API}/products")"
 
+echo "Catálogo responde com release: $(call GET /products | jq -r '.release // "(sem campo release)"')"
+
 PRODUCT_ID=$(call POST /products '{"name":"Produto smoke test","description":"sam-lab","priceCents":1990,"stock":5}' | jq -r '.product.id')
 echo "Produto criado: $PRODUCT_ID"
 

@@ -36,6 +36,7 @@ Globals:
         DATA_SOURCE: dynamodb
         MARKETPLACE_TABLE_NAME: !Ref MarketplaceTable
         ALLOWED_ORIGIN: !Ref AllowedOrigin
+        RELEASE_SHA: !Ref ReleaseSha
 
 Resources:
   UserPool:
